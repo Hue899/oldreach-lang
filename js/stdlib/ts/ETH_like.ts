@@ -259,7 +259,7 @@ const newEventQueue = (): EventQueue => {
     } catch (e) {
       const es = `${e}`;
       debug(dhead, `err`, e, es);
-      if ( es.includes('Unable to find block hash') ) {
+      if ( es.includes('Unable to find block hash') || es.includes('after last accepted block') ) {
         debug(dhead, 'ignore');
         toBlock = undefined;
       } else {
@@ -849,7 +849,7 @@ const connectAccount = async (networkAccount: NetworkAccount): Promise<Account> 
     const getABI = stdGetABI(ABI);
     const getEventTys = mkGetEventTys(bin, stdlib);
 
-    return stdContract({ bin, getABI, getEventTys, waitUntilTime, waitUntilSecs, selfAddress, iam, stdlib, setupView, setupEvents, _setup, givenInfoP });
+    return stdContract({ bin, getABI, getEventTys, waitUntilTime, waitUntilSecs, selfAddress, iam, stdlib, setupView, setupEvents, _setup, givenInfoP, doAppOptIn });
   };
 
   function setDebugLabel(newLabel: string): Account {
@@ -901,9 +901,15 @@ const connectAccount = async (networkAccount: NetworkAccount): Promise<Account> 
     return md;
   };
 
+  const appOptedIn = async (_ctc: ContractInfo): Promise<boolean> => {
+    return true;
+  };
+
   const accObj = { networkAccount, getAddress: selfAddress, stdlib, setDebugLabel,
                    tokenAccepted, tokensAccepted: tokensAccepted_, tokenAccept, tokenMetadata,
-                   contract, setGasLimit, getGasLimit, setStorageLimit, getStorageLimit };
+                   contract, setGasLimit, getGasLimit, setStorageLimit, getStorageLimit,
+                   appOptedIn,
+                 };
   const acc = accObj as unknown as Account;
   const balanceOf_ = (token?: Token): Promise<BigNumber> => balanceOf(acc, token);
   const balancesOf_ = (tokens: Array<Token | null>): Promise<Array<BigNumber>> => balancesOf(acc, tokens);
@@ -1176,6 +1182,13 @@ function setCustomHttpEventHandler() {
   console.warn(`setCustomHttpEventHandler is not supported on this connector`);
 }
 
+const doAppOptIn = async (_ctc: ContractInfo): Promise<void> => {
+  return;
+};
+const appOptedIn = async (_acc: Account | Address, _ctc: ContractInfo): Promise<boolean> => {
+  return true;
+};
+
 // TODO: restore type ann once types are in place
 // const ethLike: EthLike = {
 const ethLike = {
@@ -1194,6 +1207,8 @@ const ethLike = {
   balanceOf,
   balancesOf,
   minimumBalanceOf,
+  appOptedIn,
+  doAppOptIn,
   transfer,
   connectAccount,
   newAccountFromSecret,

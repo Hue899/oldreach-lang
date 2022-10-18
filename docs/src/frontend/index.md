@@ -697,6 +697,25 @@ Returns a Promise for an array of tokens that are accepted by `acc`.
 On networks which do not keep track of this information (e.g. Ethereum), this returns an empty array.
 
 ---
+@{ref("js", "appOptIn")}
+```js
+ctc.appOptIn() => Promise<void>
+```
+
+This does nothing on some networks.
+On others, it opts into the contract `ctc`.
+
+---
+@{ref("js", "appOptedIn")}@{ref("js", "stdlib.appOptedIn")}
+```js
+acc.appOptedIn(info:ContractInfo) => Promise<boolean>
+stdlib.appOptedIn(acc: Account | Address, info: ContractInfo) => Promise<boolean>
+```
+
+On some networks this always returns `true`.
+On others, it checks whether the account has opted into the contract specified by `info`.
+
+---
 @{ref("js", "tokenMetadata")}
 ```js
 acc.tokenMetadata(token) => Promise<object>
