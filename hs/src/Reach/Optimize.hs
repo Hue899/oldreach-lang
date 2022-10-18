@@ -68,6 +68,8 @@ instance Semigroup CommonEnv where
 instance Monoid CommonEnv where
   mempty = CommonEnv mempty mempty mempty mempty mempty
 
+type FuseEnv = M.Map DLVar (SwitchCases DLTail)
+
 data Env = Env
   { eFocus :: Focus
   , eParts :: [SLPart]
@@ -80,6 +82,7 @@ data Env = Env
   , eSimulate :: Bool
   , eSvs :: S.Set DLVar
   , eVarsSet ::IORef (M.Map DLVar Int)
+  , eFusionCases :: IORef FuseEnv
   }
 
 mkVar :: SrcLoc -> DLType -> App DLVar
@@ -134,7 +137,10 @@ newScope m = do
   Env {..} <- ask
   eEnvsR' <- liftIO $ dupeIORef eEnvsR
   eVarsSet' <- liftIO $ dupeIORef eVarsSet
-  local (\e -> e {eEnvsR = eEnvsR', eVarsSet = eVarsSet'}) m
+  eFusionCases' <- liftIO $ dupeIORef eFusionCases
+  local (\e -> e { eEnvsR = eEnvsR'
+                 , eVarsSet = eVarsSet'
+                 , eFusionCases = eFusionCases' }) m
 
 lookupCommon :: Ord a => (CommonEnv -> M.Map a b) -> a -> App (Maybe b)
 lookupCommon dict obj = do
@@ -236,6 +242,7 @@ mkEnv0 eCounter eDroppedAsserts eConst eParts eMaps eSimulate eSvs = do
           map (\x -> (x, mempty)) $ F_Ctor : F_All : F_Consensus : map F_One eParts
   eEnvsR <- liftIO $ newIORef eEnvs
   eVarsSet <- liftIO $ newIORef mempty
+  eFusionCases <- liftIO $ newIORef mempty
   return $ Env {..}
 
 maybeClearMaps :: App a -> App a
@@ -920,11 +927,78 @@ preFloat = \case
     void $ updateVarSet dv $ Just . maybe 1 succ
   _ -> return ()
 
--- Optimize is generally top-down, but this is locally bottom-up. We float after optimizing the tail
+updateFusion :: DLVar -> SwitchCases DLTail -> App ()
+updateFusion dv scs = do
+  fusionCasesR <- asks eFusionCases
+  liftIO $ modifyIORef' fusionCasesR $ M.insert dv scs
+
+readFusionCases :: DLVar -> App (Maybe (SwitchCases DLTail))
+readFusionCases dv = do
+  fusionCases <- liftIO . readIORef =<< asks eFusionCases
+  return $ M.lookup dv fusionCases
+
+preFuse :: DLStmt -> App FuseEnv
+preFuse s = do
+  oldEnv <- liftIO . readIORef =<< asks eFusionCases
+  case s of
+    DL_LocalSwitch _ dv _ -> updateFusion dv mempty
+    DL_Let {} -> cantFuse
+    -- XXX We could fuse if the `DL_Var` we encounter is set within a switch.
+    -- The env would need to track the vars a switch needs to set to fuse.
+    -- We'd want to update `DL_LocalSwitch` to track whether it sets a var, for efficiency.
+    -- Q: If we end up fusing, how do we efficiently drop these `DL_Var`?
+    DL_Var {} -> cantFuse
+    _ | not (isPure s) -> cantFuse
+    _ -> return ()
+  return oldEnv
+  where cantFuse = liftIO . flip writeIORef mempty =<< asks eFusionCases
+
+fuseSwitch :: (DLStmt -> a -> a) -> SrcLoc -> DLVar -> SwitchCases DLTail -> a -> App a
+fuseSwitch mk at dv scs k =
+  readFusionCases dv >>= \case
+    Just cases -> ret $ M.mapWithKey (fuse cases) scs
+    Nothing -> ret scs
+  where
+    ret cases = return $ mk (DL_LocalSwitch at dv cases) k
+    fuse cases c (v1, b1, t1) =
+      case M.lookup c cases of
+        Just (v2, _, t2) -> do
+          -- The branch we're inling binds `v2`.
+          -- The branch we're inling *into* binds `v1`.
+          -- Set v2 to v1
+          let t2' = DT_Com (DL_Let at (DLV_Let DVC_Many v2) $ DLE_Arg at $ DLA_Var v1) t2
+          (v1, b1, dtReplace DT_Com t2' t1)
+        Nothing -> (v1, b1, t1)
+
+fuseStmt :: IsCom a => FuseEnv -> (DLStmt -> a -> a) -> a -> App a
+fuseStmt fuseEnv mk t =
+  case isCom t of
+    Just (DL_LocalSwitch at dv scs, k) -> do
+      -- We've processed everything in the tail.
+      -- Now, look in the env to see if there are any
+      -- subsequent switches to fuse into this stmt.
+      k' <- fuseSwitch mk at dv scs k
+      fusionCasesR <- asks eFusionCases
+      case isCom k' of
+        Just (DL_LocalSwitch _ _ scs1, k1) | M.member dv fuseEnv -> do
+          -- If there are previous switches looking to fuse,
+          -- reset the fusionCase env to how it was
+          -- before we processed this branch, add the info
+          -- for this switch to the env, and drop this stmt
+            liftIO $ writeIORef fusionCasesR $ M.insert dv scs1 fuseEnv
+            return $ mk (DL_Nop at) k1
+        -- If there are no previous switches looking to fuse, keep this stmt and return
+        _ -> do
+          liftIO $ writeIORef fusionCasesR fuseEnv
+          return k'
+    _ -> return t
+
+-- Optimize is generally top-down, but this is locally bottom-up. We float/fuse after optimizing the tail
 optCom :: (IsCom b, Optimize b) => (DLStmt -> b -> b) -> DLStmt -> b -> App b
 optCom mk m k = do
   preFloat m
-  float mk =<< mkCom mk <$> opt m <*> opt k
+  fuseEnv <- preFuse m
+  fuseStmt fuseEnv mk =<< float mk =<< mkCom mk <$> opt m <*> opt k
 
 instance Optimize DLTail where
   opt = \case
