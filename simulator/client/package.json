@@ -12,7 +12,7 @@
   "type": "module",
   "dependencies": {
     "net": "^1.0.2",
-    "node-fetch": "3.2.3",
+    "node-fetch": "3.2.10",
     "wait-port": "0.2.9"
   },
   "author": "reach.sh",
